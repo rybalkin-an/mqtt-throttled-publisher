@@ -101,6 +101,7 @@ class MQTTDataPublisher:
         # Spread publishing settings
         self.check_interval = 5.0  # Check for eligible endpoints every 5 seconds
         self.spread_interval = 30.0  # Spread eligible messages over 30 seconds
+        self.start_delay = 0.0  # Delay before publishing loop starts
         
         # Performance metrics
         self.publish_count = 0
@@ -741,6 +742,7 @@ class MQTTDataPublisher:
         logger.info(f"  - Per-endpoint interval: {self.endpoint_interval}s")
         logger.info(f"  - Check interval: {self.check_interval}s")
         logger.info(f"  - Spread interval: {self.spread_interval}s")
+        logger.info(f"  - Start delay: {self.start_delay}s")
         if self.max_messages_per_topic > 0:
             logger.info(f"  - Max messages per topic: {self.max_messages_per_topic}")
             logger.info(f"  - Total target messages: {self.num_endpoints * self.max_messages_per_topic}")
@@ -754,6 +756,12 @@ class MQTTDataPublisher:
             return 1
 
         try:
+            if self.start_delay > 0:
+                logger.info(f"Waiting start delay: {self.start_delay:.2f}s before publishing...")
+                if self.shutdown_event.wait(timeout=self.start_delay):
+                    logger.info("Shutdown requested during start delay")
+                    return 0
+
             cycle_count = 0
             next_stats_time = time.time() + 60  # Print stats every 60 seconds
             self.last_stats_time = time.time()
@@ -848,6 +856,9 @@ def main():
     parser.add_argument('--spread-interval', type=float,
                         default=float(os.getenv('SPREAD_INTERVAL', '30.0')),
                         help='Interval over which to spread eligible messages (seconds)')
+    parser.add_argument('--start-delay', type=float,
+                        default=float(os.getenv('START_DELAY', '0')),
+                        help='Delay in seconds before publishing starts')
     parser.add_argument('--qos', type=int, choices=[0, 1, 2],
                         default=int(os.getenv('QOS', '1')),
                         help='MQTT QoS level')
@@ -888,6 +899,7 @@ def main():
     publisher.endpoint_interval = args.endpoint_interval
     publisher.check_interval = args.check_interval
     publisher.spread_interval = args.spread_interval
+    publisher.start_delay = args.start_delay
     publisher.publish_qos = args.qos
     publisher.retain_messages = args.retain
     publisher.max_messages_per_topic = args.max_messages_per_topic
@@ -903,6 +915,9 @@ def main():
 
     if publisher.spread_interval <= 0:
         logger.error("Spread interval must be greater than 0")
+        sys.exit(1)
+    if publisher.start_delay < 0:
+        logger.error("Start delay must be >= 0")
         sys.exit(1)
     if publisher.max_messages_per_topic < 0:
         logger.error("Max messages per topic must be >= 0")
