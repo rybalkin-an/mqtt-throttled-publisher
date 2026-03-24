@@ -106,6 +106,7 @@ Key parameters:
 - `--endpoint-interval`: Per-endpoint rate limit in seconds (default: 17.65)
 - `--check-interval`: How often to check for eligible endpoints (default: 5.0)
 - `--spread-interval`: Time to spread messages over (default: 30.0)
+- `--max-messages-per-topic`: Stop each topic after N successful publishes (default: 0 = unlimited)
 - `--qos`: MQTT QoS level 0-2 (default: 1)
 - `--log-level`: Logging level (default: INFO)
 ```
@@ -124,6 +125,7 @@ Key parameters:
 | `ENDPOINT_INTERVAL` | 17.65                       | Per-endpoint rate limit (seconds)         |
 | `CHECK_INTERVAL`    | 5.0                         | Check frequency (seconds)                 |
 | `SPREAD_INTERVAL`   | 30.0                        | Spread distribution time (seconds)        |
+| `MAX_MESSAGES_PER_TOPIC` | 0                      | Max successful messages per topic (0 = unlimited) |
 | `QOS`               | 1                           | MQTT QoS level                            |
 | `LOG_LEVEL`         | INFO                        | Logging level                             |
 

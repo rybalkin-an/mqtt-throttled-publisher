@@ -94,6 +94,9 @@ class MQTTDataPublisher:
         self.endpoint_interval = 17.65  # Configurable interval per endpoint
         self.endpoint_last_publish = {}  # Track last publish time per endpoint
         self.endpoint_last_publish_lock = threading.Lock()  # Thread-safe access
+        self.max_messages_per_topic = 0  # 0 means unlimited
+        self.endpoint_success_count = {}  # Track successful messages per endpoint/topic
+        self.endpoint_success_count_lock = threading.Lock()
 
         # Spread publishing settings
         self.check_interval = 5.0  # Check for eligible endpoints every 5 seconds
@@ -154,12 +157,37 @@ class MQTTDataPublisher:
         Returns:
             bool: True if endpoint can publish, False if rate limited
         """
+        if self.max_messages_per_topic > 0:
+            with self.endpoint_success_count_lock:
+                sent_count = self.endpoint_success_count.get(sensor_id, 0)
+                if sent_count >= self.max_messages_per_topic:
+                    return False
+
         current_time = time.time()
         
         with self.endpoint_last_publish_lock:
             last_publish = self.endpoint_last_publish.get(sensor_id, 0)
             time_since_last = current_time - last_publish
             return time_since_last >= self.endpoint_interval
+
+    def all_topics_reached_limit(self) -> bool:
+        """Return True when all endpoints reached max_messages_per_topic."""
+        if self.max_messages_per_topic <= 0:
+            return False
+
+        return self.get_completed_topics_count() >= self.num_endpoints
+
+    def get_completed_topics_count(self) -> int:
+        """Get number of topics that already reached max_messages_per_topic."""
+        if self.max_messages_per_topic <= 0:
+            return 0
+
+        with self.endpoint_success_count_lock:
+            completed_topics = sum(
+                1 for sensor_id in range(1, self.num_endpoints + 1)
+                if self.endpoint_success_count.get(sensor_id, 0) >= self.max_messages_per_topic
+            )
+        return completed_topics
 
     def on_connect(self, client: mqtt.Client, userdata, flags, rc):
         """Callback for when the client receives a CONNACK response."""
@@ -474,6 +502,8 @@ class MQTTDataPublisher:
                 current_time = time.time()
                 with self.endpoint_last_publish_lock:
                     self.endpoint_last_publish[sensor_id] = current_time
+                with self.endpoint_success_count_lock:
+                    self.endpoint_success_count[sensor_id] = self.endpoint_success_count.get(sensor_id, 0) + 1
                 
                 logger.debug(f"Published to {topic}: {len(payload)} bytes (MID: {msg_info.mid})")
                 return True
@@ -498,9 +528,19 @@ class MQTTDataPublisher:
         """
         eligible = []
         current_time = time.time()
-        
+        success_snapshot = {}
+
+        if self.max_messages_per_topic > 0:
+            with self.endpoint_success_count_lock:
+                success_snapshot = self.endpoint_success_count.copy()
+
         with self.endpoint_last_publish_lock:
             for sensor_id in range(1, self.num_endpoints + 1):
+                if self.max_messages_per_topic > 0:
+                    sent_count = success_snapshot.get(sensor_id, 0)
+                    if sent_count >= self.max_messages_per_topic:
+                        continue
+
                 last_publish = self.endpoint_last_publish.get(sensor_id, 0)
                 time_since_last = current_time - last_publish
                 if time_since_last >= self.endpoint_interval:
@@ -675,6 +715,10 @@ class MQTTDataPublisher:
             logger.info(f"Total dropped (rate limited): {self.dropped_count}")
             logger.info(f"Per-endpoint interval: {self.endpoint_interval:.2f}s")
             logger.info(f"Spread interval: {self.spread_interval:.1f}s")
+            if self.max_messages_per_topic > 0:
+                completed_topics = self.get_completed_topics_count()
+                logger.info(f"Max messages per topic: {self.max_messages_per_topic}")
+                logger.info(f"Completed topics: {completed_topics}/{self.num_endpoints}")
             logger.info(f"Current publish rate: {current_rate:.1f} msg/sec")
             
             if total_attempts > 0:
@@ -697,6 +741,11 @@ class MQTTDataPublisher:
         logger.info(f"  - Per-endpoint interval: {self.endpoint_interval}s")
         logger.info(f"  - Check interval: {self.check_interval}s")
         logger.info(f"  - Spread interval: {self.spread_interval}s")
+        if self.max_messages_per_topic > 0:
+            logger.info(f"  - Max messages per topic: {self.max_messages_per_topic}")
+            logger.info(f"  - Total target messages: {self.num_endpoints * self.max_messages_per_topic}")
+        else:
+            logger.info("  - Max messages per topic: unlimited")
         logger.info(f"  - QoS: {self.publish_qos}")
 
         # Connect to broker
@@ -730,6 +779,12 @@ class MQTTDataPublisher:
                                f"efficiency: {cycle_stats['spread_efficiency']:.1f}%")
                 else:
                     logger.debug(f"Spread cycle #{cycle_count}: no eligible endpoints")
+
+                if self.all_topics_reached_limit():
+                    logger.info(
+                        f"All topics reached limit ({self.max_messages_per_topic} messages/topic). Stopping publisher."
+                    )
+                    break
                 
                 # Print statistics periodically
                 current_time = time.time()
@@ -804,6 +859,9 @@ def main():
     parser.add_argument('--output-data-type', choices=['sensor', 'float', 'sequential'],
                         default=os.getenv('OUTPUT_DATA_TYPE', 'sensor'),
                         help='Choose output data format: "sensor" (default), "float", or "sequential"')
+    parser.add_argument('--max-messages-per-topic', type=int,
+                        default=int(os.getenv('MAX_MESSAGES_PER_TOPIC', '0')),
+                        help='Maximum successful messages per topic; 0 means unlimited')
 
     # Logging arguments
     parser.add_argument('--log-level', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
@@ -832,6 +890,7 @@ def main():
     publisher.spread_interval = args.spread_interval
     publisher.publish_qos = args.qos
     publisher.retain_messages = args.retain
+    publisher.max_messages_per_topic = args.max_messages_per_topic
 
     # Validate settings
     if publisher.endpoint_interval <= 0:
@@ -844,6 +903,9 @@ def main():
 
     if publisher.spread_interval <= 0:
         logger.error("Spread interval must be greater than 0")
+        sys.exit(1)
+    if publisher.max_messages_per_topic < 0:
+        logger.error("Max messages per topic must be >= 0")
         sys.exit(1)
 
     # Calculate theoretical rates
